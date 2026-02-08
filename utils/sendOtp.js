@@ -2,6 +2,10 @@ const nodemailer = require('nodemailer');
 const { Resend } = (() => {
   try { return require('resend'); } catch (e) { return {}; }
 })();
+let sendgrid = null;
+if (process.env.SENDGRID_API_KEY) {
+  try { sendgrid = require('@sendgrid/mail'); sendgrid.setApiKey(process.env.SENDGRID_API_KEY); } catch (e) { console.warn('SendGrid package not installed or failed to load'); }
+}
 const twilio = require('twilio');
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
@@ -89,7 +93,23 @@ const sendOtp = async (input) => {
       subject: 'Your Purple Wheel OTP',
       text: `Your verification code is ${code}. It expires in 5 minutes.`,
     };
-    // Prefer Resend API if configured (avoids SMTP port blocking)
+    // Prefer SendGrid Web API if configured
+    if (sendgrid) {
+      try {
+        await sendgrid.send({
+          to: normalized,
+          from: process.env.SENDGRID_SENDER || process.env.EMAIL_USER || process.env.RESEND_FROM || 'onboarding@resend.dev',
+          subject: mailOptions.subject,
+          text: mailOptions.text,
+          html: `<p>Your verification code is <strong>${code}</strong>. It expires in 5 minutes.</p>`,
+        });
+        return { code, expiresAt, normalizedContact: normalized };
+      } catch (e) {
+        console.error('SendGrid send failed, falling back:', e.message || e);
+      }
+    }
+
+    // Next prefer Resend API if configured (avoids SMTP port blocking)
     if (resend) {
       try {
         await resend.emails.send({
@@ -110,7 +130,7 @@ const sendOtp = async (input) => {
       return { code, expiresAt, normalizedContact: normalized };
     }
 
-    throw new Error('No email provider configured: set RESEND_API_KEY or SMTP env vars (EMAIL_HOST/EMAIL_SERVICE and EMAIL_USER/EMAIL_PASS)');
+    throw new Error('No email provider configured: set SENDGRID_API_KEY, RESEND_API_KEY, or SMTP env vars (EMAIL_HOST/EMAIL_SERVICE and EMAIL_USER/EMAIL_PASS)');
   }
 
   // Phone flow: call Twilio Verify with a normalized E.164 number
