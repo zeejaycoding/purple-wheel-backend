@@ -2,13 +2,42 @@ const nodemailer = require('nodemailer');
 const twilio = require('twilio');
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const transporter = (() => {
+  // Prefer explicit SMTP host/port (use SendGrid, Mailgun, etc.) configured via env.
+  if (process.env.EMAIL_HOST) {
+    return nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: process.env.EMAIL_PORT ? parseInt(process.env.EMAIL_PORT, 10) : 587,
+      secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for 587
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      connectionTimeout: 10000,
+    });
+  }
+
+  if (process.env.EMAIL_SERVICE) {
+    return nodemailer.createTransport({
+      service: process.env.EMAIL_SERVICE,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      connectionTimeout: 10000,
+    });
+  }
+
+  // Fallback to Gmail service if no explicit host/service provided (may time out on some hosts)
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+    connectionTimeout: 10000,
+  });
+})();
 
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();  // 6 digits
 
