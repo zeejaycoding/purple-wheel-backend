@@ -1,42 +1,51 @@
 const nodemailer = require('nodemailer');
+const { Resend } = (() => {
+  try { return require('resend'); } catch (e) { return {}; }
+})();
 const twilio = require('twilio');
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
+const resend = (Resend && process.env.RESEND_API_KEY) ? new Resend(process.env.RESEND_API_KEY) : null;
+
+// SMTP transporter fallback (used if Resend is not configured)
 const transporter = (() => {
-  // Prefer explicit SMTP host/port (use SendGrid, Mailgun, etc.) configured via env.
-  if (process.env.EMAIL_HOST) {
-    return nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: process.env.EMAIL_PORT ? parseInt(process.env.EMAIL_PORT, 10) : 587,
-      secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for 587
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      connectionTimeout: 10000,
-    });
-  }
+  try {
+    if (process.env.EMAIL_HOST) {
+      return nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT ? parseInt(process.env.EMAIL_PORT, 10) : 587,
+        secure: process.env.EMAIL_SECURE === 'true',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+        connectionTimeout: 10000,
+      });
+    }
 
-  if (process.env.EMAIL_SERVICE) {
-    return nodemailer.createTransport({
-      service: process.env.EMAIL_SERVICE,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      connectionTimeout: 10000,
-    });
-  }
+    if (process.env.EMAIL_SERVICE) {
+      return nodemailer.createTransport({
+        service: process.env.EMAIL_SERVICE,
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+        connectionTimeout: 10000,
+      });
+    }
 
-  // Fallback to Gmail service if no explicit host/service provided (may time out on some hosts)
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-    connectionTimeout: 10000,
-  });
+    // Minimal Gmail fallback (may be blocked on some hosts)
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+      return nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+        connectionTimeout: 10000,
+      });
+    }
+  } catch (e) {
+    console.warn('Failed to create transporter fallback', e.message || e);
+  }
+  return null;
 })();
 
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();  // 6 digits
@@ -80,8 +89,28 @@ const sendOtp = async (input) => {
       subject: 'Your Purple Wheel OTP',
       text: `Your verification code is ${code}. It expires in 5 minutes.`,
     };
-    await transporter.sendMail(mailOptions);
-    return { code, expiresAt, normalizedContact: normalized };
+    // Prefer Resend API if configured (avoids SMTP port blocking)
+    if (resend) {
+      try {
+        await resend.emails.send({
+          from: process.env.RESEND_FROM || process.env.EMAIL_USER || 'onboarding@resend.dev',
+          to: normalized,
+          subject: mailOptions.subject,
+          html: `<p>Your verification code is <strong>${code}</strong>. It expires in 5 minutes.</p>`,
+          text: mailOptions.text,
+        });
+        return { code, expiresAt, normalizedContact: normalized };
+      } catch (e) {
+        console.error('Resend send failed, falling back to SMTP:', e.message || e);
+      }
+    }
+
+    if (transporter) {
+      await transporter.sendMail(mailOptions);
+      return { code, expiresAt, normalizedContact: normalized };
+    }
+
+    throw new Error('No email provider configured: set RESEND_API_KEY or SMTP env vars (EMAIL_HOST/EMAIL_SERVICE and EMAIL_USER/EMAIL_PASS)');
   }
 
   // Phone flow: call Twilio Verify with a normalized E.164 number
